@@ -1,0 +1,11 @@
+{"type":"system","subtype":"init","cwd":"/tmp/s","session_id":"abc","tools":["Read","mcp__expense__receipts_list"],"mcp_servers":[{"name":"expense","status":"connected"}],"model":"claude-sonnet-5-5"}
+{"type":"stream_event","event":{"type":"message_start","message":{"id":"m1"}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Let me check "}}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"your receipts."}}}
+{"type":"assistant","message":{"id":"m1","role":"assistant","content":[{"type":"text","text":"Let me check your receipts."},{"type":"tool_use","id":"toolu_1","name":"mcp__expense__receipts_list","input":{"month":"2026-10"}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_1","content":[{"type":"text","text":"[{\"id\":1}]"}],"is_error":false}]}}
+{"type":"assistant","message":{"id":"m2","role":"assistant","content":[{"type":"tool_use","id":"toolu_2","name":"mcp__otherwise__vigia_due","input":{}}]}}
+{"type":"user","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"boom","is_error":true}]}}
+{"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"You have **3** receipts."}}}
+{"type":"assistant","message":{"id":"m3","role":"assistant","content":[{"type":"text","text":"You have **3** receipts."}]}}
+{"type":"result","subtype":"success","is_error":false,"duration_ms":4200,"result":"You have **3** receipts.","session_id":"abc"}

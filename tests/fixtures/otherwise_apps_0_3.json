@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "id": "1763700000-0000abcd",
+  "title": "What's due this month?",
+  "backend": "claude_code",
+  "created": 1763700000,
+  "updated": 1763700100,
+  "messages": [
+    { "user": true, "text": "What's due this month?" },
+    { "user": false, "text": "Two things.", "tools": [ { "app": "vigia", "tool": "due" }, { "tool": "today", "failed": true } ] }
+  ]
+}

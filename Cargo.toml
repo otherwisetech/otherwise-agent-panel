@@ -1,0 +1,51 @@
+[package]
+name = "otherwise-agent-panel"
+description = "The shared AI panel of Otherwise Technologies' desktop apps: your own Claude Code, Codex or opencode (or the app's own AI service) docked next to the app, with its data attached through MCP for one session only"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/otherwisetech/otherwise-agent-panel"
+readme = "README.md"
+keywords = ["gpui", "ai", "mcp", "claude", "agent"]
+
+[lib]
+name = "otherwise_agent_panel"
+
+[features]
+default = ["ui"]
+# The GPUI dock, panel, chat and embedded terminal. Without it: providers, arguments, stream
+# parsers, attachments, history (no GPUI in the build).
+ui = ["dep:gpui", "dep:gpui-component", "dep:alacritty_terminal"]
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# data root, atomic writes, app names
+otherwise-link = { git = "https://github.com/otherwisetech/otherwise-link", tag = "v0.2.0" }
+# GPUI stack: no `rev` here on purpose. Hosts depend on the same git URLs, so one copy is built;
+# Cargo.lock pins zed eb5483528be6 and gpui-component 972a3ebfd01a. Never `cargo update` them.
+gpui = { git = "https://github.com/zed-industries/zed", optional = true }
+gpui-component = { git = "https://github.com/longbridge/gpui-component", optional = true }
+# the embedded terminal: Zed's alacritty fork, same rev as Zed and Nodo
+alacritty_terminal = { git = "https://github.com/zed-industries/alacritty", rev = "4c129667ce56611becdc82de6e28218c80e2e88f", optional = true }
+
+# process groups: stopping a run also stops what the CLI started (its MCP servers)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile = "3"
+gpui_platform = { git = "https://github.com/zed-industries/zed", features = ["font-kit"] }
+gpui-component-assets = { git = "https://github.com/longbridge/gpui-component" }
+
+[[example]]
+name = "demo"
+required-features = ["ui"]
+
+[profile.dev]
+opt-level = 1
+debug = 0
+[profile.dev.package."*"]
+opt-level = 2
