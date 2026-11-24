@@ -139,7 +139,7 @@ example used by the tests and `examples/demo.rs`.
 
 Every app gets Ollama in the agent picker when it runs on the computer (or at the URL set in
 the panel's Ollama settings) and has models. The panel itself is the agent: it starts the
-servers from your `mcp_servers(mode)` for the conversation, lists their tools, offers them to
+servers from your `mcp_servers(mode)` for each question (like the CLIs do), lists their tools, offers them to
 the model and runs the calls. Two things to know:
 
 - **Automático is asked as Preguntar**: with Ollama, `mcp_servers` is called with

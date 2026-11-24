@@ -3,7 +3,7 @@
 //!
 //! - Opt-in and light: the panel only *asks* a running Ollama what it has (`/api/tags`, with
 //!   `/api/show` for the capabilities when the list lacks them). It never starts Ollama and
-//!   never pulls a model. Requests carry a short `keep_alive`; closing the session unloads the
+//!   never pulls a model. Requests carry a short `keep_alive`; closing the conversation unloads the
 //!   model (`keep_alive: 0`).
 //! - The agent loop runs here: `/api/chat` with `tools`, the calls executed on the app's MCP
 //!   servers ([`crate::mcp_client`]), at most [`MAX_STEPS`] rounds of tool calls.
@@ -195,7 +195,7 @@ pub trait Tools {
     fn call(&mut self, server: &str, tool: &str, args: Value) -> Result<(String, bool), String>;
 }
 
-/// The app's MCP servers, started for one session.
+/// The app's MCP servers, started for one question (stopped when dropped).
 pub struct McpTools {
     clients: Vec<McpClient>,
     tools: Vec<McpTool>,
@@ -510,16 +510,4 @@ pub fn run_turn(q: &Question, tools: &mut dyn Tools, cancel: &Cancel, emit: &mut
             messages.push(json!({"role": "tool", "tool_name": f, "content": cut(&out, MAX_TOOL_TEXT)}));
         }
     }
-}
-
-/// The MCP servers started for one conversation; restarted when the permission mode or the
-/// servers change, stopped (and the model unloaded) when the conversation closes.
-pub struct Session {
-    pub key: String,
-    pub tools: McpTools,
-}
-
-pub fn session_key(conversation: &str, mode: PermissionMode, servers: &[McpServer]) -> String {
-    let s: Vec<String> = servers.iter().map(|s| format!("{}={} {}", s.name, s.program.display(), s.args.join(" "))).collect();
-    format!("{conversation}|{}|{}", mode.key(), s.join(";"))
 }

@@ -98,8 +98,7 @@ pub struct AgentPanel {
     pub(super) expand_to: DockMode,
     /// What Ollama said when we last looked (`None`: not looked, or hidden).
     pub(super) ollama: Option<ollama::Status>,
-    /// The MCP servers started for the Ollama conversation, and the model it loaded.
-    ollama_session: Arc<Mutex<Option<ollama::Session>>>,
+    /// The Ollama server and model this conversation loaded (unloaded when it closes).
     ollama_loaded: Arc<Mutex<Option<(String, String)>>>,
     /// The URL field of the Ollama settings.
     pub(super) ollama_url: Entity<TextareaState>,
@@ -157,7 +156,6 @@ impl AgentPanel {
             focus: cx.focus_handle(),
             expand_to,
             ollama: None,
-            ollama_session: Arc::new(Mutex::new(None)),
             ollama_loaded: Arc::new(Mutex::new(None)),
             ollama_url,
             memory: None,
@@ -413,19 +411,12 @@ impl AgentPanel {
         cx.notify();
     }
 
-    /// The Ollama session ends: its MCP servers stop and the model leaves memory
-    /// (`keep_alive: 0`). `wait`: unload before returning (the app is quitting).
+    /// The Ollama session ends: the model leaves memory (`keep_alive: 0`). `wait`: before
+    /// returning (the app is quitting).
     pub(super) fn close_ollama(&mut self, wait: bool) {
-        let session = self.ollama_session.lock().unwrap_or_else(|e| e.into_inner()).take();
-        let loaded = self.ollama_loaded.lock().unwrap_or_else(|e| e.into_inner()).take();
-        if session.is_none() && loaded.is_none() {
-            return;
-        }
+        let Some((url, model)) = self.ollama_loaded.lock().unwrap_or_else(|e| e.into_inner()).take() else { return };
         let job = move || {
-            drop(session);
-            if let Some((url, model)) = loaded
-                && let Ok(c) = ollama::Client::new(&url)
-            {
+            if let Ok(c) = ollama::Client::new(&url) {
                 c.unload(&model);
             }
         };
@@ -631,7 +622,7 @@ impl AgentPanel {
         let model = self.current_model(&p.id).id;
         let is_ollama = p.id == ProviderId::Ollama;
         let mode = if is_ollama { ollama::effective_mode(self.prefs.permission) } else { self.prefs.permission };
-        let ollama_job = is_ollama.then(|| (self.ollama_url_value(), self.ollama_model(model.as_deref().unwrap_or_default()), self.ollama_session.clone(), self.ollama_loaded.clone()));
+        let ollama_job = is_ollama.then(|| (self.ollama_url_value(), self.ollama_model(model.as_deref().unwrap_or_default()), self.ollama_loaded.clone()));
         let context = self.host.context(cx);
         let system = self.system();
         let session = self.session_dir();
@@ -649,8 +640,8 @@ impl AgentPanel {
             let mut emit = |e: StreamEvent| sink.lock().unwrap_or_else(|p| p.into_inner()).events.push(e);
             let res = match (&p.remote, p.id.cli(), &p.program) {
                 _ if ollama_job.is_some() => {
-                    let (url, model, session_slot, loaded) = ollama_job.expect("checked");
-                    run_ollama(&url, &model, &servers, &conversation_id, mode, &session, &session_slot, &loaded, &system, context.as_deref(), &history, &text, &attachments, &cancel, &mut emit)
+                    let (url, model, loaded) = ollama_job.expect("checked");
+                    run_ollama(&url, &model, &servers, &session, &loaded, &system, context.as_deref(), &history, &text, &attachments, &cancel, &mut emit)
                 }
                 (Some(r), _, _) => r.send(RemoteTurn { conversation_id, model, mode, system, context, history, text, attachments, language }, &mut emit, &cancel),
                 (None, Some(cli), Some(program)) => {
@@ -883,17 +874,13 @@ impl AgentPanel {
     }
 }
 
-/// One Ollama question on the background thread: the session's MCP servers (started once per
-/// conversation and mode), then the tool loop.
+/// One Ollama question on the background thread: the app's MCP servers, then the tool loop.
 #[allow(clippy::too_many_arguments)]
 fn run_ollama(
     url: &str,
     model: &OllamaModel,
     servers: &[McpServer],
-    conversation: &str,
-    mode: PermissionMode,
     dir: &std::path::Path,
-    slot: &Mutex<Option<ollama::Session>>,
     loaded: &Mutex<Option<(String, String)>>,
     system: &str,
     context: Option<&str>,
@@ -904,23 +891,18 @@ fn run_ollama(
     emit: &mut dyn FnMut(StreamEvent),
 ) -> Result<String, AgentError> {
     let client = ollama::Client::new(url).map_err(AgentError::Failed)?;
-    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
-    let key = ollama::session_key(conversation, mode, servers);
-    if guard.as_ref().is_none_or(|s| s.key != key) {
-        *guard = None;
-        let _ = std::fs::create_dir_all(dir);
-        let tools = if model.tools() { ollama::McpTools::start(servers, dir) } else { ollama::McpTools::start(&[], dir) };
-        for f in &tools.failed {
-            emit(StreamEvent::Error(f.clone()));
-        }
-        *guard = Some(ollama::Session { key, tools });
+    // started for this question and stopped after it, like the CLIs' own MCP servers: every
+    // turn sees the app's current data and permission mode
+    let _ = std::fs::create_dir_all(dir);
+    let mut tools = ollama::McpTools::start(if model.tools() { servers } else { &[] }, dir);
+    for f in &tools.failed {
+        emit(StreamEvent::Error(f.clone()));
     }
-    let Some(session) = guard.as_mut() else { return Err(AgentError::Failed(String::new())) };
     *loaded.lock().unwrap_or_else(|e| e.into_inner()) = Some((url.to_string(), model.name.clone()));
     let names: Vec<String> = servers.iter().map(|s| s.name.clone()).collect();
     let turn = Turn { system, context, history, text, attachments };
     let q = ollama::Question { client: &client, model, turn: &turn, servers: &names, max_steps: ollama::MAX_STEPS };
-    ollama::run_turn(&q, &mut session.tools, cancel, emit)
+    ollama::run_turn(&q, &mut tools, cancel, emit)
 }
 
 pub(super) fn error_text(e: &AgentError) -> String {

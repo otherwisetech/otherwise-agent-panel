@@ -25,7 +25,7 @@ never touched.
 - **Ollama, built in**: when Ollama runs (`http://localhost:11434` or a configured URL) the
   picker offers "Ollama · <model>" with the models already pulled, their size and a warning for
   models large for the computer's memory. The panel runs the tool loop itself (`/api/chat` with
-  `tools`): it starts the app's MCP server for the session, maps its tools to Ollama's schema
+  `tools`): it starts the app's MCP server for each question, maps its tools to Ollama's schema
   and runs the calls, at most 8 rounds per question. Writes stay Aplicar / Rechazar cards, even
   in Automático. Models without tool support answer as plain chat. The panel never starts
   Ollama and never pulls a model; it sends `keep_alive: "5m"` and unloads the model when the
