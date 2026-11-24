@@ -7,7 +7,7 @@ shared AI panel. Otherwise Apps is the reference adopter.
 
 ```toml
 [dependencies]
-otherwise-agent-panel = { git = "https://github.com/otherwisetech/otherwise-agent-panel", tag = "v0.1.0" }
+otherwise-agent-panel = { git = "https://github.com/otherwisetech/otherwise-agent-panel", tag = "v0.2.0" }
 ```
 
 The panel uses the same git URLs for `gpui` / `gpui-component` as every Otherwise app, without a
@@ -135,7 +135,21 @@ for your service is yours to decide (`turn.mode`). Report proposals with
 `report_pending_change` just like an MCP server would. `remote::FakeRemote` is a scripted
 example used by the tests and `examples/demo.rs`.
 
-## 7. Before you ship
+## 7. Ollama (built in, nothing to do)
+
+Every app gets Ollama in the agent picker when it runs on the computer (or at the URL set in
+the panel's Ollama settings) and has models. The panel itself is the agent: it starts the
+servers from your `mcp_servers(mode)` for each question (like the CLIs do), lists their tools, offers them to
+the model and runs the calls. Two things to know:
+
+- **Automático is asked as Preguntar**: with Ollama, `mcp_servers` is called with
+  `PermissionMode::Ask` even in Automático, so writes are always proposals your app reports
+  with `report_pending_change`.
+- Your server must answer `initialize` / `tools/list` / `tools/call` over stdio (any MCP server
+  does). Tool results longer than 16 KB are cut before they reach the model; keep read tools
+  concise and paged.
+
+## 8. Before you ship
 
 - `cargo test` in the panel repo passes on macOS, Linux and Windows (CI).
 - Your app's i18n guard still passes (the panel's strings live in the panel).

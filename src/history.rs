@@ -263,6 +263,19 @@ pub struct Prefs {
     /// Model id per provider key (absent: Default).
     pub models: std::collections::BTreeMap<String, String>,
     pub permission: PermissionMode,
+    pub ollama: OllamaPrefs,
+}
+
+/// The built-in Ollama provider's settings. Its default model is `models["ollama"]`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OllamaPrefs {
+    /// `None`: `http://localhost:11434`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Leave Ollama out of the picker (and don't look for it).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 impl Default for Prefs {
@@ -276,6 +289,7 @@ impl Default for Prefs {
             provider: None,
             models: Default::default(),
             permission: PermissionMode::default(),
+            ollama: OllamaPrefs::default(),
         }
     }
 }
