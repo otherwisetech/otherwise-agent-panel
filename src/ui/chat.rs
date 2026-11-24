@@ -5,7 +5,9 @@ use super::widgets::*;
 use super::{ClosePanelMenu, NewConversation};
 use crate::attach::{Attachment, Kind};
 use crate::history::{ChangeState, DOCK_MODES, DockMode, Message, PendingChange, ToolUse, ViewMode};
-use crate::permission::MODES;
+use crate::ollama;
+use crate::permission::{MODES, PermissionMode};
+use crate::provider::ProviderId;
 use crate::t;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
@@ -254,6 +256,7 @@ impl AgentPanel {
                 .child(icon(IconName::Bot, 28., s.muted))
                 .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).child(t!("panel.none.title")))
                 .child(div().text_size(px(12.5)).text_color(s.muted).text_center().child(t!("panel.none.body")))
+                .when_some(self.ollama_hint(), |d, h| d.child(div().text_size(px(12.)).text_color(s.note).text_center().child(h)))
                 .child(button(s, "detect", t!("panel.none.detect"), false).on_click(cx.listener(|this, _, _, cx| this.detect(cx))));
         }
         d = d
@@ -352,9 +355,22 @@ impl AgentPanel {
                 let cur = self.current().map(|p| p.id);
                 for (i, p) in self.providers().into_iter().enumerate() {
                     let id = p.id.clone();
-                    let hint = if p.remote.is_some() { Some(t!("panel.menu.remote_hint", vendor = p.vendor)) } else { p.program.as_ref().map(|x| x.display().to_string()) };
-                    frame = frame.child(menu_row(s, ("prov", i), p.label.clone(), hint, cur.as_ref() == Some(&p.id)).on_click(cx.listener(move |this, _, _, cx| this.set_provider(id.clone(), cx))));
+                    let (label, hint) = if p.id == ProviderId::Ollama {
+                        (format!("{} · {}", p.label, self.current_model(&p.id).label), Some(self.ollama_where()))
+                    } else if p.remote.is_some() {
+                        (p.label.clone(), Some(t!("panel.menu.remote_hint", vendor = p.vendor)))
+                    } else {
+                        (p.label.clone(), p.program.as_ref().map(|x| x.display().to_string()))
+                    };
+                    frame = frame.child(menu_row(s, ("prov", i), label, hint, cur.as_ref() == Some(&p.id)).on_click(cx.listener(move |this, _, _, cx| this.set_provider(id.clone(), cx))));
                 }
+                if let Some(h) = self.ollama_hint() {
+                    frame = frame.child(div().px(px(8.)).py(px(4.)).max_w(px(300.)).text_size(px(11.5)).text_color(s.muted).child(h));
+                }
+                frame = frame.child(menu_row(s, "prov-ollama", t!("panel.ollama.settings"), None, false).on_click(cx.listener(|this, _, _, cx| {
+                    this.menu = Some(Menu::Ollama);
+                    cx.notify();
+                })));
                 frame = frame.child(menu_row(s, "prov-detect", t!("panel.none.detect"), None, false).on_click(cx.listener(|this, _, _, cx| {
                     this.menu = None;
                     this.detect(cx);
@@ -365,10 +381,11 @@ impl AgentPanel {
                 if let Some(p) = self.current() {
                     let cur = self.current_model(&p.id);
                     let list = self.models_of(&p.id);
+                    let is_ollama = p.id == ProviderId::Ollama;
                     let mut rows = div().id("model-list").flex().flex_col().max_h(px(300.)).overflow_y_scroll();
                     for (i, m) in list.into_iter().enumerate() {
                         let on = m.id == cur.id;
-                        let hint = m.id.clone().filter(|id| *id != m.label);
+                        let hint = if is_ollama { Some(self.ollama_model_hint(m.id.as_deref().unwrap_or_default())) } else { m.id.clone().filter(|id| *id != m.label) };
                         let m2 = m.clone();
                         rows = rows.child(menu_row(s, ("model", i), m.label.clone(), hint, on).on_click(cx.listener(move |this, _, _, cx| this.set_model(m2.clone(), cx))));
                     }
@@ -377,8 +394,39 @@ impl AgentPanel {
             }
             Menu::Permission => {
                 frame = frame.child(menu_title(s, t!("panel.menu.permission")));
+                let on_ollama = self.current().is_some_and(|p| p.id == ProviderId::Ollama);
                 for (i, m) in MODES.into_iter().enumerate() {
-                    frame = frame.child(menu_row(s, ("perm", i), m.label(), Some(m.hint()), self.prefs.permission == m).on_click(cx.listener(move |this, _, _, cx| this.set_permission(m, cx))));
+                    let hint = if on_ollama && m == PermissionMode::Auto { t!("panel.ollama.auto_hint") } else { m.hint() };
+                    frame = frame.child(menu_row(s, ("perm", i), m.label(), Some(hint), self.prefs.permission == m).on_click(cx.listener(move |this, _, _, cx| this.set_permission(m, cx))));
+                }
+            }
+            Menu::Ollama => {
+                let hidden = self.prefs.ollama.hidden;
+                frame = frame
+                    .child(menu_title(s, t!("panel.ollama.settings_title")))
+                    .child(
+                        menu_row(s, "ollama-show", t!("panel.ollama.show"), hidden.then(|| t!("panel.ollama.hidden_hint")), !hidden)
+                            .on_click(cx.listener(move |this, _, _, cx| this.set_ollama_hidden(!hidden, cx))),
+                    )
+                    .child(div().px(px(8.)).pt(px(6.)).text_size(px(11.5)).text_color(s.muted).child(t!("panel.ollama.url")))
+                    .child(div().px(px(8.)).w(px(300.)).child(Textarea::new(&self.ollama_url)))
+                    .child(div().px(px(8.)).py(px(4.)).child(button(s, "ollama-save", t!("panel.ollama.save"), false).on_click(cx.listener(|this, _, _, cx| this.save_ollama_url(cx)))));
+                if let Some(ollama::Status::Ready(list)) = &self.ollama
+                    && !hidden
+                {
+                    frame = frame.child(menu_title(s, t!("panel.ollama.default_model")));
+                    let cur = self.current_model(&ProviderId::Ollama).id;
+                    let mut rows = div().id("ollama-models").flex().flex_col().max_h(px(220.)).overflow_y_scroll();
+                    for (i, m) in list.iter().enumerate() {
+                        let name = m.name.clone();
+                        rows = rows.child(
+                            menu_row(s, ("ollama-model", i), m.name.clone(), Some(self.ollama_model_hint(&m.name)), cur.as_deref() == Some(m.name.as_str()))
+                                .on_click(cx.listener(move |this, _, _, cx| this.set_ollama_default(name.clone(), cx))),
+                        );
+                    }
+                    frame = frame.child(rows);
+                } else if let Some(h) = self.ollama_hint() {
+                    frame = frame.child(div().px(px(8.)).py(px(4.)).max_w(px(300.)).text_size(px(11.5)).text_color(s.muted).child(h));
                 }
             }
             Menu::Commands => {
@@ -518,6 +566,15 @@ impl AgentPanel {
         }
         c = c.child(self.render_toolbar(s, cx));
         let privacy = match self.current() {
+            Some(p) if p.id == ProviderId::Ollama => {
+                let url = self.ollama_url_value();
+                let mut t = if ollama::is_local(&url) { t!("panel.privacy.ollama") } else { t!("panel.privacy.ollama_remote", host = ollama::host_of(&url)) };
+                for w in self.ollama_warnings() {
+                    t.push(' ');
+                    t.push_str(&w);
+                }
+                t
+            }
             Some(p) if p.remote.is_some() => t!("panel.privacy.remote", agent = p.label, vendor = p.vendor),
             Some(p) => t!("panel.privacy.cli", agent = p.label, vendor = p.vendor),
             None => t!("panel.privacy.none"),
@@ -527,6 +584,58 @@ impl AgentPanel {
             c = c.child(m);
         }
         c
+    }
+
+    /// Where Ollama runs, for the picker.
+    fn ollama_where(&self) -> String {
+        let url = self.ollama_url_value();
+        if ollama::is_local(&url) { t!("panel.ollama.local") } else { t!("panel.ollama.server", host = ollama::host_of(&url)) }
+    }
+
+    /// Why Ollama isn't in the picker, when that's worth saying.
+    fn ollama_hint(&self) -> Option<String> {
+        if self.prefs.ollama.hidden {
+            return None;
+        }
+        match &self.ollama {
+            Some(ollama::Status::Down { .. }) if self.prefs.ollama.url.is_some() => Some(t!("panel.ollama.down_url", url = self.ollama_url_value())),
+            Some(ollama::Status::Down { installed: true }) => Some(t!("panel.ollama.down")),
+            Some(ollama::Status::NoModels) => Some(t!("panel.ollama.no_models")),
+            _ => None,
+        }
+    }
+
+    /// "6.6 GB · 9.0B · solo chat · ocupa ~6.6 GB de memoria"
+    fn ollama_model_hint(&self, name: &str) -> String {
+        let m = self.ollama_model(name);
+        let mut parts = Vec::new();
+        if m.size > 0 {
+            parts.push(ollama::gb(m.size));
+        }
+        if let Some(p) = &m.parameter_size {
+            parts.push(p.clone());
+        }
+        if !m.tools() {
+            parts.push(t!("panel.ollama.chat_only"));
+        }
+        if m.size > 0 && ollama::heavy(m.size, self.memory) {
+            parts.push(t!("panel.ollama.heavy", size = ollama::gb(m.size)));
+        }
+        parts.join(" · ")
+    }
+
+    /// Under the input with Ollama: a large model for this computer, a model without tools.
+    fn ollama_warnings(&self) -> Vec<String> {
+        let Some(id) = self.current_model(&ProviderId::Ollama).id else { return Vec::new() };
+        let m = self.ollama_model(&id);
+        let mut v = Vec::new();
+        if m.size > 0 && ollama::heavy(m.size, self.memory) {
+            v.push(t!("panel.ollama.heavy_warn", size = ollama::gb(m.size), total = self.memory.map(ollama::ram).unwrap_or_default()));
+        }
+        if !m.tools() {
+            v.push(t!("panel.ollama.chat_only_warn", app = self.host.app_name()));
+        }
+        v
     }
 
     fn render_bar(&self, s: &PanelStyle, cx: &mut Context<Self>) -> Div {

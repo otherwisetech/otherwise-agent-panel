@@ -1,13 +1,13 @@
 [package]
 name = "otherwise-agent-panel"
-description = "The shared AI panel of Otherwise Technologies' desktop apps: your own Claude Code, Codex or opencode (or the app's own AI service) docked next to the app, with its data attached through MCP for one session only"
-version = "0.1.0"
+description = "The shared AI panel of Otherwise Technologies' desktop apps: your own Claude Code, Codex, opencode or local Ollama models (or the app's own AI service) docked next to the app, with its data attached through MCP for one session only"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.85"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/otherwisetech/otherwise-agent-panel"
 readme = "README.md"
-keywords = ["gpui", "ai", "mcp", "claude", "agent"]
+keywords = ["gpui", "ai", "mcp", "ollama", "agent"]
 
 [lib]
 name = "otherwise_agent_panel"

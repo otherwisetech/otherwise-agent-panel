@@ -63,11 +63,12 @@ impl Cli {
     }
 }
 
-/// A provider as the picker and the saved preferences know it: `claude`, `codex`, `opencode`
-/// or `remote:<id>`.
+/// A provider as the picker and the saved preferences know it: `claude`, `codex`, `opencode`,
+/// `ollama` (built in, see [`crate::ollama`]) or `remote:<id>`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum ProviderId {
     Cli(Cli),
+    Ollama,
     Remote(String),
 }
 
@@ -75,6 +76,7 @@ impl ProviderId {
     pub fn key(&self) -> String {
         match self {
             ProviderId::Cli(c) => c.binary().to_string(),
+            ProviderId::Ollama => "ollama".to_string(),
             ProviderId::Remote(id) => format!("remote:{id}"),
         }
     }
@@ -83,13 +85,16 @@ impl ProviderId {
         if let Some(id) = s.strip_prefix("remote:") {
             return (!id.is_empty()).then(|| ProviderId::Remote(id.to_string()));
         }
+        if s == "ollama" {
+            return Some(ProviderId::Ollama);
+        }
         Cli::from_binary(s).map(ProviderId::Cli)
     }
 
     pub fn cli(&self) -> Option<Cli> {
         match self {
             ProviderId::Cli(c) => Some(*c),
-            ProviderId::Remote(_) => None,
+            _ => None,
         }
     }
 }

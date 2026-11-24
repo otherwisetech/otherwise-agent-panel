@@ -8,6 +8,7 @@ use crate::args::{self, Session, Turn};
 use crate::attach::{self, Attachment};
 use crate::history::{self, ChangeState, Conversation, DockMode, Message, PendingChange, Prefs, ToolUse, ViewMode};
 use crate::mcp::McpServer;
+use crate::ollama::{self, OllamaModel};
 use crate::permission::PermissionMode;
 use crate::provider::{self, Cli, Model, ProviderId};
 use crate::remote::{Cancel, RemoteProvider, RemoteTurn};
@@ -37,6 +38,7 @@ pub(super) enum Menu {
     Model,
     Permission,
     Commands,
+    Ollama,
 }
 
 #[derive(Default)]
@@ -94,6 +96,15 @@ pub struct AgentPanel {
     pub(super) focus: FocusHandle,
     /// Where the bar expands to.
     pub(super) expand_to: DockMode,
+    /// What Ollama said when we last looked (`None`: not looked, or hidden).
+    pub(super) ollama: Option<ollama::Status>,
+    /// The MCP servers started for the Ollama conversation, and the model it loaded.
+    ollama_session: Arc<Mutex<Option<ollama::Session>>>,
+    ollama_loaded: Arc<Mutex<Option<(String, String)>>>,
+    /// The URL field of the Ollama settings.
+    pub(super) ollama_url: Entity<TextareaState>,
+    /// Physical memory, for the "large model" warning.
+    pub(super) memory: Option<u64>,
     _subs: Vec<Subscription>,
 }
 
@@ -110,6 +121,16 @@ impl AgentPanel {
                 cx.notify();
             }
             _ => {}
+        });
+        let ollama_url = cx.new(|cx| TextareaState::new(window, cx).auto_grow(1, 1).submit_on_enter(true).placeholder(ollama::DEFAULT_URL).default_value(prefs.ollama.url.clone().unwrap_or_default()));
+        let url_sub = cx.subscribe_in(&ollama_url, window, |this, _, ev: &InputEvent, _, cx| {
+            if let InputEvent::PressEnter { .. } = ev {
+                this.save_ollama_url(cx);
+            }
+        });
+        let quit = cx.on_app_quit(|this, _| {
+            this.close_ollama(true);
+            async {}
         });
         let expand_to = if matches!(prefs.last_visible, DockMode::Bar | DockMode::Hidden) { DockMode::Right } else { prefs.last_visible };
         let mut p = AgentPanel {
@@ -135,7 +156,12 @@ impl AgentPanel {
             pending_ask: None,
             focus: cx.focus_handle(),
             expand_to,
-            _subs: vec![sub],
+            ollama: None,
+            ollama_session: Arc::new(Mutex::new(None)),
+            ollama_loaded: Arc::new(Mutex::new(None)),
+            ollama_url,
+            memory: None,
+            _subs: vec![sub, url_sub, quit],
         };
         for r in &p.remotes {
             p.models.insert(ProviderId::Remote(r.id()).key(), r.models());
@@ -281,18 +307,41 @@ impl AgentPanel {
         }
         self.detecting = true;
         let dir = self.dir.clone();
+        let ollama_url = (!self.prefs.ollama.hidden).then(|| ollama::url_or_default(self.prefs.ollama.url.as_deref()));
         let task = cx.background_executor().spawn(async move {
-            let found = provider::detect_system();
             let home = otherwise_link::paths::home();
+            // Ollama is asked in parallel (a quick local request, never a start or a pull)
+            let probe = ollama_url.map(|url| {
+                let home = home.clone();
+                std::thread::spawn(move || (ollama::Client::new(&url).map(|c| c.status(&home)).unwrap_or(ollama::Status::Down { installed: false }), ollama::total_memory()))
+            });
+            let found = provider::detect_system();
             let models: Vec<(String, Vec<Model>)> = found.iter().map(|(c, p)| (ProviderId::Cli(*c).key(), provider::models(*c, p, &home))).collect();
-            (found, models, history::list(&dir))
+            let ollama = probe.and_then(|h| h.join().ok());
+            (found, models, history::list(&dir), ollama)
         });
         cx.spawn(async move |this, cx| {
-            let (found, models, past) = task.await;
+            let (found, models, past, ollama) = task.await;
             this.update(cx, |this, cx| {
                 this.clis = Some(found);
                 this.models.extend(models);
                 this.past = past;
+                let key = ProviderId::Ollama.key();
+                match ollama {
+                    Some((status, memory)) => {
+                        if let ollama::Status::Ready(list) = &status {
+                            this.models.insert(key, list.iter().map(|m| Model::new(&m.name, &m.name)).collect());
+                        } else {
+                            this.models.remove(&key);
+                        }
+                        this.ollama = Some(status);
+                        this.memory = memory.or(this.memory);
+                    }
+                    None => {
+                        this.models.remove(&key);
+                        this.ollama = None;
+                    }
+                }
                 this.detecting = false;
                 if let Some(q) = this.pending_ask.take() {
                     this.start_turn(q, cx);
@@ -307,8 +356,84 @@ impl AgentPanel {
     pub(super) fn providers(&self) -> Vec<ProviderEntry> {
         let mut v: Vec<ProviderEntry> =
             self.clis.iter().flatten().map(|(c, p)| ProviderEntry { id: ProviderId::Cli(*c), label: c.label().into(), vendor: c.vendor().into(), program: Some(p.clone()), remote: None }).collect();
+        if self.ollama_ready() {
+            v.push(ProviderEntry { id: ProviderId::Ollama, label: "Ollama".into(), vendor: "Ollama".into(), program: None, remote: None });
+        }
         v.extend(self.remotes.iter().map(|r| ProviderEntry { id: ProviderId::Remote(r.id()), label: r.label(), vendor: r.vendor(), program: None, remote: Some(r.clone()) }));
         v
+    }
+
+    pub(super) fn ollama_ready(&self) -> bool {
+        !self.prefs.ollama.hidden && matches!(self.ollama, Some(ollama::Status::Ready(_)))
+    }
+
+    pub(super) fn ollama_url_value(&self) -> String {
+        ollama::url_or_default(self.prefs.ollama.url.as_deref())
+    }
+
+    /// The listed model named `name` (an unknown name: capabilities unknown).
+    pub(super) fn ollama_model(&self, name: &str) -> OllamaModel {
+        match &self.ollama {
+            Some(ollama::Status::Ready(l)) => l.iter().find(|m| m.name == name).cloned(),
+            _ => None,
+        }
+        .unwrap_or_else(|| OllamaModel { name: name.to_string(), size: 0, parameter_size: None, capabilities: None })
+    }
+
+    /// Settings: the server's URL (empty: the default), then look again.
+    pub(super) fn save_ollama_url(&mut self, cx: &mut Context<Self>) {
+        let v = self.ollama_url.read(cx).value().trim().to_string();
+        let url = (!v.is_empty() && v != ollama::DEFAULT_URL).then_some(v);
+        if url != self.prefs.ollama.url {
+            self.close_ollama(false);
+            self.prefs.ollama.url = url;
+            self.save_prefs();
+        }
+        self.detect(cx);
+        cx.notify();
+    }
+
+    /// Settings: show / hide Ollama in the picker.
+    pub(super) fn set_ollama_hidden(&mut self, hidden: bool, cx: &mut Context<Self>) {
+        self.prefs.ollama.hidden = hidden;
+        if hidden {
+            self.close_ollama(false);
+            self.ollama = None;
+            self.models.remove(&ProviderId::Ollama.key());
+        }
+        self.save_prefs();
+        self.detect(cx);
+        cx.notify();
+    }
+
+    /// Settings: the model Ollama starts with (the same choice as the model picker's).
+    pub(super) fn set_ollama_default(&mut self, name: String, cx: &mut Context<Self>) {
+        self.prefs.models.insert(ProviderId::Ollama.key(), name);
+        self.save_prefs();
+        cx.notify();
+    }
+
+    /// The Ollama session ends: its MCP servers stop and the model leaves memory
+    /// (`keep_alive: 0`). `wait`: unload before returning (the app is quitting).
+    pub(super) fn close_ollama(&mut self, wait: bool) {
+        let session = self.ollama_session.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let loaded = self.ollama_loaded.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if session.is_none() && loaded.is_none() {
+            return;
+        }
+        let job = move || {
+            drop(session);
+            if let Some((url, model)) = loaded
+                && let Ok(c) = ollama::Client::new(&url)
+            {
+                c.unload(&model);
+            }
+        };
+        if wait {
+            job();
+        } else {
+            std::thread::spawn(job);
+        }
     }
 
     /// The chosen provider: the saved one when available, else the first.
@@ -395,6 +520,7 @@ impl AgentPanel {
         if self.live.is_some() {
             return;
         }
+        self.close_ollama(false);
         self.conv = Conversation::new();
         self.draft.clear();
         self.offer = None;
@@ -411,6 +537,7 @@ impl AgentPanel {
         if self.live.is_some() {
             return;
         }
+        self.close_ollama(false);
         self.conv = c;
         self.draft.clear();
         self.show_history = false;
@@ -502,7 +629,9 @@ impl AgentPanel {
             return;
         }
         let model = self.current_model(&p.id).id;
-        let mode = self.prefs.permission;
+        let is_ollama = p.id == ProviderId::Ollama;
+        let mode = if is_ollama { ollama::effective_mode(self.prefs.permission) } else { self.prefs.permission };
+        let ollama_job = is_ollama.then(|| (self.ollama_url_value(), self.ollama_model(model.as_deref().unwrap_or_default()), self.ollama_session.clone(), self.ollama_loaded.clone()));
         let context = self.host.context(cx);
         let system = self.system();
         let session = self.session_dir();
@@ -519,6 +648,10 @@ impl AgentPanel {
             let sink = shared.clone();
             let mut emit = |e: StreamEvent| sink.lock().unwrap_or_else(|p| p.into_inner()).events.push(e);
             let res = match (&p.remote, p.id.cli(), &p.program) {
+                _ if ollama_job.is_some() => {
+                    let (url, model, session_slot, loaded) = ollama_job.expect("checked");
+                    run_ollama(&url, &model, &servers, &conversation_id, mode, &session, &session_slot, &loaded, &system, context.as_deref(), &history, &text, &attachments, &cancel, &mut emit)
+                }
                 (Some(r), _, _) => r.send(RemoteTurn { conversation_id, model, mode, system, context, history, text, attachments, language }, &mut emit, &cancel),
                 (None, Some(cli), Some(program)) => {
                     let s = Session { cli, program, model: model.as_deref(), mode, servers: &servers, dir: &session };
@@ -748,6 +881,46 @@ impl AgentPanel {
         self.terminal_key = self.terminal_settings_key();
         cx.notify();
     }
+}
+
+/// One Ollama question on the background thread: the session's MCP servers (started once per
+/// conversation and mode), then the tool loop.
+#[allow(clippy::too_many_arguments)]
+fn run_ollama(
+    url: &str,
+    model: &OllamaModel,
+    servers: &[McpServer],
+    conversation: &str,
+    mode: PermissionMode,
+    dir: &std::path::Path,
+    slot: &Mutex<Option<ollama::Session>>,
+    loaded: &Mutex<Option<(String, String)>>,
+    system: &str,
+    context: Option<&str>,
+    history: &[(bool, String)],
+    text: &str,
+    attachments: &[Attachment],
+    cancel: &Cancel,
+    emit: &mut dyn FnMut(StreamEvent),
+) -> Result<String, AgentError> {
+    let client = ollama::Client::new(url).map_err(AgentError::Failed)?;
+    let mut guard = slot.lock().unwrap_or_else(|e| e.into_inner());
+    let key = ollama::session_key(conversation, mode, servers);
+    if guard.as_ref().is_none_or(|s| s.key != key) {
+        *guard = None;
+        let _ = std::fs::create_dir_all(dir);
+        let tools = if model.tools() { ollama::McpTools::start(servers, dir) } else { ollama::McpTools::start(&[], dir) };
+        for f in &tools.failed {
+            emit(StreamEvent::Error(f.clone()));
+        }
+        *guard = Some(ollama::Session { key, tools });
+    }
+    let Some(session) = guard.as_mut() else { return Err(AgentError::Failed(String::new())) };
+    *loaded.lock().unwrap_or_else(|e| e.into_inner()) = Some((url.to_string(), model.name.clone()));
+    let names: Vec<String> = servers.iter().map(|s| s.name.clone()).collect();
+    let turn = Turn { system, context, history, text, attachments };
+    let q = ollama::Question { client: &client, model, turn: &turn, servers: &names, max_steps: ollama::MAX_STEPS };
+    ollama::run_turn(&q, &mut session.tools, cancel, emit)
 }
 
 pub(super) fn error_text(e: &AgentError) -> String {
